@@ -1,0 +1,208 @@
+name: Staging Deploy
+
+on:
+  push:
+    branches: [staging]
+
+env:
+  ENVIRONMENT: "staging"
+  CLUSTER: "PaaS-Staging"
+
+jobs:
+
+  build:
+    name: Build
+    runs-on: [self-hosted, staging]
+    steps:
+
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Set up Go 1.x
+      uses: actions/setup-go@v2
+      with:
+        go-version: ^1.13
+      id: go
+
+    - name: Setup Env
+      run: |
+        echo "::set-env name=GOPATH::$(dirname $GITHUB_WORKSPACE)"
+        echo "::set-env name=GOPRIVATE::github.com/kyani-inc"
+        echo "::add-path::$(dirname $GITHUB_WORKSPACE)/bin"
+        echo "::set-env name=KMS_NAME::$(basename $GITHUB_REPOSITORY)"
+        echo "::set-env name=BUILD::$ENVIRONMENT-$(sh -c "date -u +%Y%m%d%H%M")-$GITHUB_RUN_NUMBER"
+      shell: bash
+
+    - name: Grant access to Go private repos
+      run: git config --global url."https://${{ secrets.GO_MODULES_TOKEN }}:x-oauth-basic@github.com/".insteadOf "https://github.com/"
+
+    - name: Clear Go Modules
+      if: always()
+      run: sudo rm -rf ${{ env.GOPATH }}/pkg/mod/*
+
+    - name: Cache Go modules
+      id: cache-go-mod
+      uses: actions/cache@v1
+      with:
+        path: ${{ env.GOPATH }}/pkg/mod
+        key: ${{ runner.os }}-gomod-v2-${{ hashFiles('**/go.sum') }}
+
+    - name: Install Protoc
+      uses: arduino/setup-protoc@master
+      with:
+        version: '3.x'
+
+    - name: Compile Protocol Buffer definitions
+      run: |
+        go get -u -v github.com/kyani-inc/proto
+        make proto
+
+    - name: Get dependencies
+      if: steps.cache-go-mod.outputs.cache-hit != 'true'
+      run: |
+        go get ./...
+
+    - name: Generate Swagger Documentation
+      run: |
+        go get github.com/swaggo/swag/cmd/swag
+        swag init --output ./src/rest/docs --generalInfo src/rest/rest.go --parseDependency
+
+    - name: Build
+      run: |
+        go build -v -o bin/${{ env.KMS_NAME }} -tags "${{ env.ENVIRONMENT }}" -ldflags "-X github.com/kyani-inc/kms/v2.service_build=${{ env.BUILD }} -X github.com/kyani-inc/kms/v2.service_name=${{ env.KMS_NAME }}" ./src
+
+    # Test
+    - name: Install Envi
+      run: |
+        OAUTH_TOKEN=${{ secrets.GO_MODULES_TOKEN }}
+        API_URL="https://$OAUTH_TOKEN:@api.github.com/repos/kyani-inc/envi"
+        ASSET_ID=$(curl -s $API_URL/releases/latest | jq -r '.assets[1].id')
+        echo "Asset ID: $ASSET_ID"
+
+        mkdir -p $(dirname $GITHUB_WORKSPACE)/bin
+        curl -o $(dirname $GITHUB_WORKSPACE)/bin/envi -J -L -H "Accept: application/octet-stream" "$API_URL/releases/assets/$ASSET_ID"
+        chmod +x $(dirname $GITHUB_WORKSPACE)/bin/envi
+        echo "::add-path::$(dirname $GITHUB_WORKSPACE)/bin"
+
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
+
+    - name: Import Environment Variables
+      run: envi g -i ${{ env.KMS_NAME }}__${{ env.ENVIRONMENT }} > env
+
+    - name: Validate Envi Variables
+      run: sh .scripts/verify-env.sh
+      env:
+        ENVIRONMENT: ${{ env.ENVIRONMENT }}
+        KMS_NAME: ${{ env.KMS_NAME }}
+
+    - name: Upload Compiled Binary
+      uses: actions/upload-artifact@v1
+      with:
+        name: ${{ env.KMS_NAME }}
+        path: bin/${{ env.KMS_NAME }}
+
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Setup Env
+        run: |
+          echo "::set-env name=KMS_NAME::$(basename $GITHUB_REPOSITORY)"
+        shell: bash
+
+      - name: Download Compiled Binary
+        uses: actions/download-artifact@v2
+        with:
+          name: ${{ env.KMS_NAME }}
+          path: bin
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Build Dockerfile
+        run: |
+          DOCKER_IMAGE=Dockerfile
+          sed -i "s|KMS_NAME|${{ env.KMS_NAME }}|g" ${DOCKER_IMAGE}
+          cat Dockerfile
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build, tag, and push image to Amazon ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ env.KMS_NAME }}-${{ env.ENVIRONMENT }}
+        run: |
+          docker build -t ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest .
+          docker build -t ${ECR_REGISTRY}/${ECR_REPOSITORY}:${{ github.run_number }} .
+
+          docker push ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest
+          docker push ${ECR_REGISTRY}/${ECR_REPOSITORY}:${{ github.run_number }}
+
+      - name: Logout of Amazon ECR
+        if: always()
+        run: docker logout ${{ steps.login-ecr.outputs.registry }}
+
+      - name: Install Envi
+        run: |
+          OAUTH_TOKEN=${{ secrets.GO_MODULES_TOKEN }}
+          API_URL="https://$OAUTH_TOKEN:@api.github.com/repos/kyani-inc/envi"
+          ASSET_ID=$(curl -s $API_URL/releases/latest | jq -r '.assets[1].id')
+          echo "Asset ID: $ASSET_ID"
+
+          mkdir -p $(dirname $GITHUB_WORKSPACE)/bin
+          curl -o $(dirname $GITHUB_WORKSPACE)/bin/envi -J -L -H "Accept: application/octet-stream" "$API_URL/releases/assets/$ASSET_ID"
+          chmod +x $(dirname $GITHUB_WORKSPACE)/bin/envi
+          echo "::add-path::$(dirname $GITHUB_WORKSPACE)/bin"
+
+      - name: Build ECS Task Definition
+        run: |
+          TASK_DEF=ecs/task-definition.json
+          VARIABLES_JSON=$(envi g -i ${{ env.KMS_NAME }}__${{ env.ENVIRONMENT }} -o json)
+          TASK_DEF=$(cat ${TASK_DEF} | jq --argjson env_vars "$VARIABLES_JSON" '.containerDefinitions[0].environment=$env_vars')
+          TASK_DEF=${TASK_DEF//KMS_NAME/${{ env.KMS_NAME }}}
+          TASK_DEF=${TASK_DEF//ENVIRONMENT/${{ env.ENVIRONMENT }}}
+          echo $TASK_DEF > ecs/task-definition.json
+
+      - name: Register Amazon ECS task definition
+        id: build-ecs-task
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: ecs/task-definition.json
+          container-name: ${{ env.KMS_NAME }}-${{ env.ENVIRONMENT }}
+          image: ${{ steps.login-ecr.outputs.registry }}/${{ env.KMS_NAME }}-${{ env.ENVIRONMENT }}:${{ github.run_number }}
+
+      - name: Deploy to Amazon ECS service
+        id: deploy-ecs-task
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.build-ecs-task.outputs.task-definition }}
+          service: ${{ env.KMS_NAME }}-${{ env.ENVIRONMENT }}
+          cluster: ${{ env.CLUSTER }}
+
+      - name: Post-Deployment Details
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CLUSTER: ${{ env.CLUSTER }}
+          ENVIRONMENT: ${{ env.ENVIRONMENT }}
+          SERVICE: ${{ env.KMS_NAME }}-${{ env.ENVIRONMENT }}
+          TASK_DEFINITION: ${{ steps.deploy-ecs-task.outputs.task-definition-arn }}
+          IMAGE: ${{ env.KMS_NAME }}-${{ env.ENVIRONMENT }}:${{ github.run_number }}
+          KMS_NAME: ${{ env.KMS_NAME }}
+          RUN_ID: ${{ github.run_id }}
+        run: sh .scripts/post-deploy.sh && true

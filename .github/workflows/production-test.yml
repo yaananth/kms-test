@@ -1,0 +1,107 @@
+name: Production
+
+on:
+  pull_request:
+    branches: [master]
+
+env:
+  ENVIRONMENT: "production"
+
+jobs:
+
+  build:
+    name: Build & Test
+    runs-on: [self-hosted, production]
+    steps:
+
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Set up Go 1.x
+      uses: actions/setup-go@v2
+      with:
+        go-version: ^1.13
+      id: go
+
+    - name: Setup Env
+      run: |
+        echo "::set-env name=GOPATH::$(dirname $GITHUB_WORKSPACE)"
+        echo "::set-env name=GOPRIVATE::github.com/kyani-inc"
+        echo "::add-path::$(dirname $GITHUB_WORKSPACE)/bin"
+        echo "::set-env name=KMS_NAME::$(basename $GITHUB_REPOSITORY)"
+        echo "::set-env name=BUILD::$(sh -c "date -u +%Y%m%d%H%M")-$GITHUB_RUN_NUMBER"
+      shell: bash
+
+    - name: Grant access to Go private repos
+      run: git config --global url."https://${{ secrets.GO_MODULES_TOKEN }}:x-oauth-basic@github.com/".insteadOf "https://github.com/"
+
+    - name: Clear Go Modules
+      if: always()
+      run: sudo rm -rf ${{ env.GOPATH }}/pkg/mod/*
+
+    - name: Cache Go modules
+      id: cache-go-mod
+      uses: actions/cache@v1
+      with:
+        path: ${{ env.GOPATH }}/pkg/mod
+        key: ${{ runner.os }}-gomod-v2-${{ hashFiles('**/go.sum') }}
+
+    - name: Install Protoc
+      uses: arduino/setup-protoc@master
+      with:
+        version: '3.x'
+
+    - name: Compile Protocol Buffer definitions
+      run: |
+        go get -u -v github.com/kyani-inc/proto
+        make proto
+
+    - name: Get dependencies
+      if: steps.cache-go-mod.outputs.cache-hit != 'true'
+      run: |
+        go get ./...
+
+    - name: Build
+      run: |
+        go build -v -o bin/${{ env.KMS_NAME }} -ldflags "-X main.BUILD=${{ env.BUILD }} -X main.AppName=${{ env.KMS_NAME }}" ./src
+
+    # Test
+
+    - name: Install Envi
+      run: |
+        OAUTH_TOKEN=${{ secrets.GO_MODULES_TOKEN }}
+        API_URL="https://$OAUTH_TOKEN:@api.github.com/repos/kyani-inc/envi"
+        ASSET_ID=$(curl -s $API_URL/releases/latest | jq -r '.assets[1].id')
+        echo "Asset ID: $ASSET_ID"
+
+        mkdir -p $(dirname $GITHUB_WORKSPACE)/bin
+        curl -o $(dirname $GITHUB_WORKSPACE)/bin/envi -J -L -H "Accept: application/octet-stream" "$API_URL/releases/assets/$ASSET_ID"
+        chmod +x $(dirname $GITHUB_WORKSPACE)/bin/envi
+        echo "::add-path::$(dirname $GITHUB_WORKSPACE)/bin"
+
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
+
+    - name: Import Environment Variables
+      run: envi g -i ${{ env.KMS_NAME }}__${{ env.ENVIRONMENT }} > env
+
+    - name: Validate Envi Variables
+      run: sh .scripts/verify-env.sh
+      env:
+        ENVIRONMENT: ${{ env.ENVIRONMENT }}
+        KMS_NAME: ${{ env.KMS_NAME }}
+
+    - name: Test VPN
+      run: |
+        RECORD=$(dig example.${{ env.ENVIRONMENT }}.kms.kyani SRV +short | head -n 1)
+        HOST=$(echo "$RECORD" | cut -d ' ' -f 4)
+        PORT=$(echo "$RECORD" | cut -d ' ' -f 3)
+        curl "http://${HOST}:${PORT}/health"
+
+    - name: Run Go Tests
+      run: make test
+      shell: bash

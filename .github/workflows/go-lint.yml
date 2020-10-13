@@ -1,0 +1,43 @@
+name: Go Lint
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master, staging]
+
+jobs:
+  imports:
+    name: Check Formatting
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Set up Go 1.x
+      uses: actions/setup-go@v2
+      with:
+        go-version: ^1.13
+      id: go
+
+    - name: Setup Env
+      shell: bash
+      run: |
+        echo "::set-env name=GOPATH::$(dirname $GITHUB_WORKSPACE)"
+        echo "::set-env name=GOPRIVATE::github.com/kyani-inc"
+        echo "::add-path::$(dirname $GITHUB_WORKSPACE)/bin"
+
+    - name: Grant access to Go private repos
+      run: |
+        git config --global url."https://${{ secrets.GO_MODULES_TOKEN }}:x-oauth-basic@github.com/".insteadOf "https://github.com/"
+
+    - name: Clear Go Modules
+      if: always()
+      run: sudo rm -rf ${{ env.GOPATH }}/pkg/mod/*
+
+    - name: Run goimports
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        go get -v golang.org/x/tools/cmd/goimports
+        sh .scripts/go-lint.sh

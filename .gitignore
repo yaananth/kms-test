@@ -1,0 +1,14 @@
+env
+bin/kms-*
+DS_Store
+.DS_Store
+._DS_Store
+tmp/
+bin/*
+.vscode
+.idea
+test.log
+test.pid
+src/rest/docs/docs.go
+src/rest/docs/swagger.json
+src/rest/docs/swagger.yaml

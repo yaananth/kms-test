@@ -1,0 +1,40 @@
+{
+  "containerDefinitions": [
+    {
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/aws/ecs/ENVIRONMENT/KMS_NAME",
+          "awslogs-region": "us-east-1"
+        }
+      },
+      "portMappings": [
+        {
+          "protocol": "tcp",
+          "containerPort": 80
+        }
+      ],
+      "cpu": 16,
+      "environment": [],
+      "ulimits": [
+        {
+          "name": "nofile",
+          "softLimit": 2048,
+          "hardLimit": 4096
+        }
+      ],
+      "memory": 256,
+      "image": "IMAGE_NAME",
+      "essential": true,
+      "name": "KMS_NAME-ENVIRONMENT"
+    }
+  ],
+  "placementConstraints": [
+    {
+      "type": "memberOf",
+      "expression": "attribute:worker !exists"
+    }
+  ],
+  "taskRoleArn": "arn:aws:iam::563280612930:role/KMS_NAME__ENVIRONMENT",
+  "family": "KMS_NAME-ENVIRONMENT"
+}

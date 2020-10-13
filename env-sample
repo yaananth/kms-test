@@ -1,0 +1,23 @@
+# KMS Settings
+PORT=:5000
+KMS_ENV=local
+
+# AWS Settings (required for tracing)
+AWS_REGION=us-east-1
+
+# Worker settings
+KMS_WORKER_QUEUE_ARN=arn:aws:sqs:us-east-1:563280612930:kms-example__staging
+KMS_WORKER_TOPIC_ARN=arn:aws:sns:us-east-1:563280612930:kms__staging
+KMS_WORKER_DEBUG=off
+
+# Kyani SBI settings
+DB_SBI__LOGGING=off
+DB_SBI__MASTER__DSN=kms-example@tcp(au-bi-staging-cluster.cluster-cffsdiv51rsh.us-east-1.rds.amazonaws.com:3306)/Kyani?collation=utf8_general_ci&parseTime=true
+DB_SBI__MASTER__IDLE=1
+DB_SBI__MASTER__MAX=10
+DB_SBI__REPLICA__DSN=kms-example@tcp(au-bi-staging-cluster.cluster-ro-cffsdiv51rsh.us-east-1.rds.amazonaws.com:3306)/Kyani?collation=utf8_general_ci&parseTime=true
+DB_SBI__REPLICA__IDLE=1
+DB_SBI__REPLICA__MAX=10
+
+# Kyäni Microservices
+KMS_COUNTRIES_ENV=staging
